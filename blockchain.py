@@ -32,7 +32,7 @@ class Blockchain:
 
     def _mine_raw_block(self, index: int, transactions: list, previous_hash: str, timestamp: int = None) -> Block:
         if timestamp is None:
-            timestamp = int(time.time())
+            timestamp = int(time.time() * 1000)
         nonce = 0
         h = calculate_hash(
             index,
@@ -91,8 +91,10 @@ class Blockchain:
     def validate_block(block: Block, previous_block: Block):
         if block.index != previous_block.index + 1:
             return False
+
         if block.prev_hash != previous_block.hash:
             return False
+
         computed = calculate_hash(
             block.index,
             block.timestamp,
@@ -107,8 +109,10 @@ class Blockchain:
         if not hash_valid(block.hash):
             return False
 
-        if block.timestamp > time.time() + 60:
+        current_time_ms = int(time.time() * 1000)
+        if block.timestamp > current_time_ms + 60000:
             return False
+
         return True
 
     @staticmethod
