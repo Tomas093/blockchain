@@ -88,11 +88,20 @@ class Blockchain:
     # -- Validation ---------------------------------------------------------
 
     @staticmethod
-    def validate_block(block: Block, previous_block: Block):
-        if block.index != previous_block.index + 1:
+    def validate_block(block: Block, previous_block: Block = None):
+        if block.index < 0:
             return False
-        if block.prev_hash != previous_block.hash:
+        if block.timestamp <= 0:
             return False
+        if block.transactions is None:
+            return False
+        if block.prev_hash is None:
+            return False
+        if block.hash is None:
+            return False
+        if block.nonce < 0:
+            return False
+
         computed = calculate_hash(
             block.index,
             block.timestamp,
@@ -100,21 +109,64 @@ class Blockchain:
             block.prev_hash,
             block.nonce,
         )
-
+        
         if computed != block.hash:
             return False
 
-        if not hash_valid(block.hash):
+        if not block.hash.startswith("0" * DIFFICULTY):
             return False
 
-        if block.timestamp > time.time() + 60:
-            return False
-        return True
+        if block.index == 0:
+            if block.prev_hash != "0":
+                return False
+            if len(block.transactions) != 0:
+                return False
+            return True
+
+        if block.index > 0:
+            if previous_block is None:
+                return False
+
+            if block.prev_hash != previous_block.hash:
+                return False
+
+            if block.index != previous_block.index + 1:
+                return False
+
+            if block.timestamp <= previous_block.timestamp:
+                return False
+
+            if len(block.transactions) == 0:
+                return False
+
+            def get_tx_field(tx, field):
+                return tx.get(field) if isinstance(tx, dict) else getattr(tx, field, None)
+
+            if get_tx_field(block.transactions[0], 'type') != TRANSACTION_TYPE.COINBASE:
+                return False
+
+            coinbase_count = sum(
+                1 for tx in block.transactions if get_tx_field(tx, 'type') == TRANSACTION_TYPE.COINBASE)
+            if coinbase_count != 1:
+                return False
+
+            if get_tx_field(block.transactions[0], 'timestamp') != block.timestamp:
+                return False
+
+            for tx in block.transactions[1:]:
+                if get_tx_field(tx, 'type') != TRANSACTION_TYPE.TRANSFER:
+                    return False
+
+            return True
 
     @staticmethod
     def validate_chain(chain: list[Block]):
         if not chain:
             return False
+
+        if not Blockchain.validate_block(chain[0], None):
+            return False
+
         for i in range(1, len(chain)):
             if not Blockchain.validate_block(chain[i], chain[i - 1]):
                 return False
