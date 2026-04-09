@@ -46,24 +46,22 @@ def get_pending():
         pending = [tx.to_dict() if hasattr(tx, "to_dict") else tx for tx in blockchain.pending_transactions]
     return jsonify({"pending_transactions": pending, "count": len(pending)})
 
-
-@app.route("/tx", methods=["POST"])
+@app.route("/transactions", methods=["POST"])  # Cambiado a /transactions según el PDF
 def new_transaction():
     data = request.get_json(force=True)
 
-    if not all(k in data for k in ("from", "to", "amount", "sig")):
-        return jsonify({"error": "Missing fields: from, to, amount, sig"}), 400
+    if not all(k in data for k in ("from", "to", "amount", "publicKey", "signature")):
+        return jsonify({"error": "Missing fields: from, to, amount, publicKey, signature"}), 400
 
     tx = Transaction(
         from_addr=data["from"],
         to_addr=data["to"],
-        amount=data["amount"],
-        sig=data["sig"]
+        amount=int(data["amount"]),
+        public_key=data["publicKey"],
+        signature=data["signature"]
     )
     blockchain.add_transaction(tx)
-    return jsonify({"message": "Transaction added to pool", "transaction": tx.to_dict()})
-
-
+    return jsonify({"message": "Transaction added to pool", "transaction": tx.to_dict()}), 202
 @app.route("/mine", methods=["POST"])
 def mine():
     if len(blockchain.pending_transactions) == 0:
