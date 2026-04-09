@@ -1,12 +1,10 @@
 import threading
 import time
+from typing import Any
+
 import requests as http_requests
 
-<<<<<<< Insertar-COINBASE-en-bloque-
-from typing import Any
-=======
 from crypto import get_canonical_payload, verify_signature, validate_from_matches_public_key
->>>>>>> main
 from models import Block, Transaction
 from utils import calculate_hash, hash_valid, TRANSACTION_TYPE
 
@@ -26,8 +24,8 @@ class Blockchain:
         genesis = self._mine_raw_block(
             index=0,
             transactions=[],
-            previous_hash="0" * 64,
-            timestamp=0,
+            previous_hash="0",
+            timestamp=1,
         )
         self.chain.append(genesis)
 
@@ -35,7 +33,7 @@ class Blockchain:
 
     def _mine_raw_block(self, index: int, transactions: list, previous_hash: str, timestamp: int = None) -> Block:
         if timestamp is None:
-            timestamp = int(time.time())
+            timestamp = int(time.time() * 1000)
         nonce = 0
         h = calculate_hash(
             index,
@@ -64,35 +62,21 @@ class Blockchain:
             nonce=nonce
         )
 
-    def mine_block(self, miner_address="MINER_NODE_ADDRESS"):
+    def mine_block(self):
         with self.lock:
-            block_timestamp = int(time.time() * 1000)
-
-            coinbase_tx = Transaction(
-                from_addr="SYSTEM",
-                to_addr=miner_address,
-                amount=10,
-                public_key="0000000000000000000000000000000000000000000000000000000000000000",
-                signature="0000000000000000000000000000000000000000000000000000000000000000",
-                tx_type=TRANSACTION_TYPE.COINBASE,
-                timestamp=block_timestamp
-            )
-
-            txs = [coinbase_tx] + self.pending_transactions[:]
-
+            txs = self.pending_transactions[:]
             self.pending_transactions = []
             last = self.chain[-1]
 
         block = self._mine_raw_block(
             index=last.index + 1,
             transactions=txs,
-            previous_hash=last.hash,
-            timestamp=block_timestamp
+            previous_hash=last.hash
         )
 
         with self.lock:
             if block.prev_hash != self.chain[-1].hash:
-                self.pending_transactions = txs[1:] + self.pending_transactions
+                self.pending_transactions = txs + self.pending_transactions
                 return None
 
             self.chain.append(block)
@@ -121,27 +105,123 @@ class Blockchain:
         )
         return verify_signature(payload, tx.signature, tx.from_addr)
 
-    # -- Validation ---------------------------------------------------------
-    @staticmethod
-    def validate_transaction(tx) -> bool:
-        if tx.type == "COINBASE":
-            return True
+    # -- Balance calculation --
 
-        if not Blockchain._validate_ownership(tx):
+    def get_balance(self, address: str) -> int:
+        """Calculate an account's balance by scanning the blockchain and the mempool."""
+        balance = 0
+
+        # 1. Add/subtract from blocks already mined in the chain
+        for block in self.chain:
+            for tx in block.transactions:
+                # Handle both Transaction objects and dictionaries
+                tx_from = tx.get("from") if isinstance(tx, dict) else tx.from_addr
+                tx_to = tx.get("to") if isinstance(tx, dict) else tx.to_addr
+                tx_amount = tx.get("amount") if isinstance(tx, dict) else tx.amount
+
+                if tx_to == address:
+                    balance += tx_amount
+                if tx_from == address:
+                    balance -= tx_amount
+
+        # 2. Subtract amounts already spent in pending transactions (prevents quick double-spend)
+        for tx in self.pending_transactions:
+            tx_from = tx.get("from") if isinstance(tx, dict) else tx.from_addr
+            tx_amount = tx.get("amount") if isinstance(tx, dict) else tx.amount
+
+            if tx_from == address:
+                balance -= tx_amount
+
+        return balance
+
+    # -- Helper functions for transaction validation --
+
+    @staticmethod
+    def _validate_basic_rules(tx) -> bool:
+        """Basic logical rules: amount > 0 and from != to"""
+        if tx.amount <= 0:
+            print("Error: Amount must be greater than 0")
             return False
 
-        if not Blockchain._validate_signature(tx):
+        if tx.from_addr == tx.to_addr:
+            print("Error: 'from' and 'to' cannot be the same address")
             return False
 
         return True
 
+    @staticmethod
+    def _validate_ownership(tx) -> bool:
+        """Validate that: from matches the address derived from the public key"""
+        if not validate_from_matches_public_key(tx.from_addr, tx.public_key):
+            print("Error: 'from' does not match the public key")
+            return False
+        return True
 
     @staticmethod
-    def validate_block(block: Block, previous_block: Block):
-        if block.index != previous_block.index + 1:
+    def _validate_signature(tx) -> bool:
+        """Verify the cryptographic signature against the canonical payload"""
+        payload = get_canonical_payload(
+            tx.from_addr,
+            tx.to_addr,
+            tx.amount,
+            tx.timestamp
+        )
+        if not verify_signature(payload, tx.signature, tx.from_addr):
+            print("Error: Invalid cryptographic signature")
             return False
-        if block.prev_hash != previous_block.hash:
+        return True
+
+    def _validate_balance(self, tx) -> bool:
+        """Verify that the sender has sufficient funds"""
+        if self.get_balance(tx.from_addr) < tx.amount:
+            print(f"Error: Insufficient balance. Account {tx.from_addr} does not have {tx.amount} coins.")
             return False
+        return True
+
+    # -- Main transaction validation --
+
+    def validate_transaction(self, tx) -> bool:
+        """Strictly execute all TP1 validation rules"""
+
+        # 1. Special rule: COINBASE is validated together with other rules in the block
+        if tx.type == "COINBASE":
+            return True
+
+        # 2. amount > 0 and from != to
+        if not self._validate_basic_rules(tx):
+            return False
+
+        # 3. publicKey mathematically derives to the from address
+        if not self._validate_ownership(tx):
+            return False
+
+        # 4. valid signature
+        if not self._validate_signature(tx):
+            return False
+
+        # 5. sufficient balance
+        if not self._validate_balance(tx):
+            return False
+
+        return True
+
+    # -- Block and chain validation ----------------------------------------
+
+    @staticmethod
+    def validate_block(block: Block, previous_block: Block = None):
+        if block.index < 0:
+            return False
+        if block.timestamp <= 0:
+            return False
+        if block.transactions is None:
+            return False
+        if block.prev_hash is None:
+            return False
+        if block.hash is None:
+            return False
+        if block.nonce < 0:
+            return False
+
         computed = calculate_hash(
             block.index,
             block.timestamp,
@@ -153,48 +233,68 @@ class Blockchain:
         if computed != block.hash:
             return False
 
+        if block.timestamp <= previous_block.timestamp:
+            return False
+
         if not hash_valid(block.hash):
             return False
+        if block.index == 0:
+            if block.prev_hash != "0":
+                return False
+            if len(block.transactions) != 0:
+                return False
+            return True
 
-        if block.timestamp > time.time() + 60:
-            return False
-
-        if not block.transactions:
-            return False
-
-        first_tx = block.transactions[0]
-
-        try:
-            if first_tx["type"] != TRANSACTION_TYPE.COINBASE:
-                print("Rechazado: La primera tx no es COINBASE")
+        if block.index > 0:
+            if previous_block is None:
                 return False
 
-            if first_tx["from"] != "SYSTEM":
-                print("Rechazado: Coinbase from != SYSTEM")
+            if block.prev_hash != previous_block.hash:
                 return False
 
-            if first_tx["amount"] != 10:
-                print("Rechazado: Coinbase amount incorrecto")
+            if block.index != previous_block.index + 1:
                 return False
 
-            if first_tx["timestamp"] != block.timestamp:
-                print("Rechazado: Timestamp de Coinbase no coincide con el bloque")
+            if block.timestamp <= previous_block.timestamp:
+                return False
+
+            if len(block.transactions) == 0:
+                return False
+
+            def get_tx_field(tx, field):
+                return tx.get(field) if isinstance(tx, dict) else getattr(tx, field, None)
+
+            if get_tx_field(block.transactions[0], 'type') != TRANSACTION_TYPE.COINBASE:
+                return False
+
+            coinbase_count = sum(
+                1 for tx in block.transactions if get_tx_field(tx, 'type') == TRANSACTION_TYPE.COINBASE)
+            if coinbase_count != 1:
+                return False
+
+            if get_tx_field(block.transactions[0], 'timestamp') != block.timestamp:
                 return False
 
             for tx in block.transactions[1:]:
-                if tx["type"] == TRANSACTION_TYPE.COINBASE:
-                    print("Rechazado: Múltiples transacciones COINBASE")
+                if get_tx_field(tx, 'type') != TRANSACTION_TYPE.TRANSFER:
                     return False
 
-        except KeyError as e:
-            print(f"Rechazado: Transacción inválida, falta el campo {e}")
+        current_time_ms = int(time.time() * 1000)
+        if block.timestamp > current_time_ms + 60000:
             return False
+        if not Blockchain.validate_transaction(tx):
+            return False
+
         return True
 
     @staticmethod
     def validate_chain(chain: list[Block]):
         if not chain:
             return False
+
+        if not Blockchain.validate_block(chain[0], None):
+            return False
+
         for i in range(1, len(chain)):
             if not Blockchain.validate_block(chain[i], chain[i - 1]):
                 return False
