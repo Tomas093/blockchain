@@ -13,7 +13,8 @@ def resolve_periodically(interval=30):
 
 
 cmd_functions = {
-    "tx": lambda args: blockchain.add_transaction(Transaction(args[0], args[1], float(args[2]), args[3])),
+    "tx": lambda args: blockchain.add_transaction(Transaction(args[0], args[1], int(args[2]), args[3], args[4])) if len(
+        args) >= 5 else print("Error: Faltan argumentos. Uso: tx <from> <to> <amount> <publicKey> <signature>"),
     "pt": lambda args: print(
         f"Pending transactions: {[tx.to_dict() if hasattr(tx, 'to_dict') else tx for tx in blockchain.pending_transactions]}"),
     "mine": lambda args: http_requests.post(f"http://localhost:{blockchain.port}/mine", timeout=10),
