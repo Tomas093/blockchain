@@ -14,6 +14,11 @@ class Blockchain:
         self.chain: list[Block] = []
         self.pending_transactions: list[Transaction] = []
         self.peers = set()
+
+        # Cache to prevent infinite loops in the gossip protocol
+        self.seen_transactions = set()
+        self.seen_blocks = set()
+
         self.lock = threading.Lock()
         self.port = None
         self._create_genesis_block()
@@ -28,6 +33,7 @@ class Blockchain:
             timestamp=1,
         )
         self.chain.append(genesis)
+        self.seen_blocks.add(genesis.hash)
 
     # -- Mining -------------------------------------------------------------
 
@@ -90,17 +96,34 @@ class Blockchain:
 
         with self.lock:
             if block.prev_hash != self.chain[-1].hash:
+                # Chain changed while mining, restore mempool
                 self.pending_transactions = txs[1:] + self.pending_transactions
                 return None
 
             self.chain.append(block)
+            self.seen_blocks.add(block.hash)  # Cache the newly mined block
+
         return block
 
     def add_transaction(self, tx: Transaction):
+        """Adds a transaction to the mempool and broadcasts it if it is new."""
+        tx_id = tx.id if hasattr(tx, "id") else tx.get("id")
+
         with self.lock:
+            # Check cache to avoid broadcasting and processing loops
+            if tx_id in self.seen_transactions:
+                return False
+
+            # Strictly execute all validation rules before accepting
+            if not self.validate_transaction(tx):
+                return False
+
             self.pending_transactions.append(tx)
-        # (No-op helpers here: validation helpers are defined as
-        # class-level static methods below.)
+            self.seen_transactions.add(tx_id)
+
+        # Broadcast asynchronously to avoid blocking the API thread
+        threading.Thread(target=self.broadcast_transaction, args=(tx,), daemon=True).start()
+        return True
 
     # -- Validation Helper ---------------------------------------------------------
     @staticmethod
@@ -125,10 +148,8 @@ class Blockchain:
         """Calculate an account's balance by scanning the blockchain and the mempool."""
         balance = 0
 
-        # 1. Add/subtract from blocks already mined in the chain
         for block in self.chain:
             for tx in block.transactions:
-                # Handle both Transaction objects and dictionaries
                 tx_from = tx.get("from") if isinstance(tx, dict) else tx.from_addr
                 tx_to = tx.get("to") if isinstance(tx, dict) else tx.to_addr
                 tx_amount = tx.get("amount") if isinstance(tx, dict) else tx.amount
@@ -138,7 +159,6 @@ class Blockchain:
                 if tx_from == address:
                     balance -= tx_amount
 
-        # 2. Subtract amounts already spent in pending transactions (prevents quick double-spend)
         for tx in self.pending_transactions:
             tx_from = tx.get("from") if isinstance(tx, dict) else tx.from_addr
             tx_amount = tx.get("amount") if isinstance(tx, dict) else tx.amount
@@ -154,11 +174,9 @@ class Blockchain:
     def _validate_basic_rules(tx) -> bool:
         """Basic logical rules: amount > 0 and from != to"""
         if tx.amount <= 0:
-            print("Error: Amount must be greater than 0")
             return False
 
         if tx.from_addr == tx.to_addr:
-            print("Error: 'from' and 'to' cannot be the same address")
             return False
 
         return True
@@ -166,7 +184,6 @@ class Blockchain:
     def _validate_balance(self, tx) -> bool:
         """Verify that the sender has sufficient funds"""
         if self.get_balance(tx.from_addr) < tx.amount:
-            print(f"Error: Insufficient balance. Account {tx.from_addr} does not have {tx.amount} coins.")
             return False
         return True
 
@@ -174,24 +191,18 @@ class Blockchain:
 
     def validate_transaction(self, tx) -> bool:
         """Strictly execute all TP1 validation rules"""
-
-        # 1. Special rule: COINBASE is validated together with other rules in the block
         if tx.type == "COINBASE":
             return True
 
-        # 2. amount > 0 and from != to
         if not self._validate_basic_rules(tx):
             return False
 
-        # 3. publicKey mathematically derives to the from address
         if not self._validate_ownership(tx):
             return False
 
-        # 4. valid signature
         if not self._validate_signature(tx):
             return False
 
-        # 5. sufficient balance
         if not self._validate_balance(tx):
             return False
 
@@ -199,7 +210,7 @@ class Blockchain:
 
     # -- Block and chain validation ----------------------------------------
 
-    def validate_block(self,block: Block, previous_block: Block = None):
+    def validate_block(self, block: Block, previous_block: Block = None):
         if block.index < 0: return False
         if block.timestamp <= 0: return False
         if block.transactions is None: return False
@@ -222,7 +233,6 @@ class Blockchain:
         if block.index != previous_block.index + 1: return False
         if block.prev_hash != previous_block.hash: return False
         if block.timestamp <= previous_block.timestamp: return False
-
 
         current_time_ms = int(time.time() * 1000)
         if block.timestamp > current_time_ms + 60000: return False
@@ -264,7 +274,7 @@ class Blockchain:
 
         return True
 
-    def validate_chain(self,chain: list[Block]):
+    def validate_chain(self, chain: list[Block]):
         if not chain:
             return False
 
@@ -277,7 +287,7 @@ class Blockchain:
         return True
 
     def add_block(self, block: Any):
-        """Attempt to add a single block received from a peer."""
+        """Attempt to add a single block received from a peer and broadcast it."""
         if isinstance(block, dict):
             block = Block(
                 block["index"],
@@ -289,17 +299,31 @@ class Blockchain:
             )
 
         with self.lock:
+            block_hash = block.hash
+
+            # Check cache to avoid gossip loops
+            if block_hash in self.seen_blocks:
+                return False
+
             last = self.chain[-1]
             if not self.validate_block(block, last):
                 return False
+
             self.chain.append(block)
+            self.seen_blocks.add(block_hash)
+
+            # Remove mined transactions from mempool
+            mined_tx_ids = [tx["id"] if isinstance(tx, dict) else tx.id for tx in block.transactions]
             self.pending_transactions = [
                 tx for tx in self.pending_transactions
-                if tx not in block.transactions
+                if (tx.get("id") if isinstance(tx, dict) else getattr(tx, "id")) not in mined_tx_ids
             ]
-            return True
 
-    # -- Consensus ----------------------------------------------------------
+        # Successfully added to chain, broadcast to peers
+        threading.Thread(target=self.broadcast_block, args=(block,), daemon=True).start()
+        return True
+
+    # -- Consenso ----------------------------------------------------------
 
     def resolve_conflicts(self):
         """Replace local chain with the longest valid chain among peers."""
@@ -332,27 +356,45 @@ class Blockchain:
 
         if not longest_chain:
             return False
+
         print(f"  Replacing local chain with longer chain from peer (length {max_length})")
         with self.lock:
             self.chain = longest_chain
+            # Update cache to include blocks from the new chain
+            for b in self.chain:
+                self.seen_blocks.add(b.hash)
         return True
 
-    # -- P2P helpers --------------------------------------------------------
+    # -- P2P helpers (Gossip Protocol) --------------------------------------
 
     def broadcast_block(self, block):
-        if isinstance(block, Block):
-            block = block.to_dict()
+        """Broadcasts a block to all registered peers."""
+        block_dict = block.to_dict() if isinstance(block, Block) else block
+
+        for peer in list(self.peers):
+            try:
+                # Sending via TP1 standardized endpoint /blocks
+                http_requests.post(
+                    f"{peer}/blocks",
+                    json=block_dict,
+                    timeout=5,
+                )
+            except Exception:
+                # Do not remove the peer immediately; it might be a temporary network issue
+                continue
+
+    def broadcast_transaction(self, tx):
+        """Broadcasts a transaction to all registered peers."""
+        tx_dict = tx.to_dict() if hasattr(tx, "to_dict") else tx
 
         for peer in list(self.peers):
             try:
                 http_requests.post(
-                    f"{peer}/block/new",
-                    json=block,
+                    f"{peer}/transactions",
+                    json=tx_dict,
                     timeout=5,
                 )
-
             except Exception:
-                self.peers.remove(peer)
                 continue
 
     def register_peers(self, peer_urls):
@@ -360,8 +402,6 @@ class Blockchain:
             if peer_url in self.peers:
                 continue
             self.peers.add(peer_url.rstrip("/"))
-
-
 
 
 # Global blockchain instance
