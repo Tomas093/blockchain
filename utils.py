@@ -4,6 +4,7 @@ import hashlib
 
 DIFFICULTY = 4  # number of leading zeros required in block hash
 TRANSACTIONS_PER_BLOCK = 5
+AUTO_MINE_THRESHOLD = 3
 
 class TRANSACTION_TYPE:
     TRANSFER = "TRANSFER"

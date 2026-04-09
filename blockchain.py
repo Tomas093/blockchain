@@ -6,7 +6,7 @@ from typing import Any
 from crypto import get_canonical_payload, verify_signature, validate_from_matches_public_key
 
 from models import Block, Transaction
-from utils import calculate_hash, hash_valid, TRANSACTION_TYPE
+from utils import calculate_hash, hash_valid, TRANSACTION_TYPE, AUTO_MINE_THRESHOLD
 
 
 class Blockchain:
@@ -105,6 +105,17 @@ class Blockchain:
 
         return block
 
+    def _auto_mine_and_broadcast(self):
+        """Mina un bloque automáticamente y lo propaga a la red."""
+        with self.lock:
+            if len(self.pending_transactions) < AUTO_MINE_THRESHOLD:
+                return
+
+        block = self.mine_block()
+
+        if block:
+            self.broadcast_block(block)
+
     def add_transaction(self, tx: Transaction):
         """Adds a transaction to the mempool and broadcasts it if it is new."""
         tx_id = tx.id if hasattr(tx, "id") else tx.get("id")
@@ -121,8 +132,14 @@ class Blockchain:
             self.pending_transactions.append(tx)
             self.seen_transactions.add(tx_id)
 
+            pending_count = len(self.pending_transactions)
+
         # Broadcast asynchronously to avoid blocking the API thread
         threading.Thread(target=self.broadcast_transaction, args=(tx,), daemon=True).start()
+
+        if pending_count >= AUTO_MINE_THRESHOLD:
+            threading.Thread(target=self._auto_mine_and_broadcast, daemon=True).start()
+
         return True
 
     # -- Validation Helper ---------------------------------------------------------
