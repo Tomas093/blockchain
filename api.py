@@ -3,7 +3,7 @@ import logging
 
 from blockchain import blockchain
 from models import Block, Transaction
-from utils import TRANSACTION_TYPE
+from utils import TRANSACTION_TYPE, get_my_ip
 
 app = Flask(__name__)
 
@@ -196,3 +196,26 @@ def consensus():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.route("/status", methods=["GET"])
+def node_status():
+    with blockchain.lock:
+        chain_length = len(blockchain.chain)
+        latest_hash = blockchain.chain[-1].hash if chain_length > 0 else ""
+
+    return jsonify({
+        "status": "ok",
+        "node": {
+            "url": f"http://{get_my_ip()}:{blockchain.port}",
+            "address": "0x0000000000000000000000000000000000000000",  # Placeholder según requerimientos
+            "publickey": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "chain": {
+            "length": chain_length,
+            "latestHash": latest_hash
+        },
+        "peers": {
+            "count": len(blockchain.peers)
+        }
+    }), 200
