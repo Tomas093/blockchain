@@ -231,7 +231,7 @@ class Blockchain:
 
     # -- Block and chain validation ----------------------------------------
 
-    def validate_block(self, block: Block, previous_block: Block = None, external_balances: dict = None):
+    def validate_block(self, block: Block, previous_block: Block = None, external_balances: dict = None, is_full_chain_validation: bool = False):
         if block.index < 0: return False
         if block.timestamp <= 0: return False
         if block.transactions is None: return False
@@ -278,7 +278,12 @@ class Blockchain:
 
         def get_simulated_balance(addr):
             if addr not in simulated_balances:
-                simulated_balances[addr] = self.get_chain_balance(addr)
+                if is_full_chain_validation:
+                    # Si validamos una cadena entera desde 0, el balance base es 0
+                    simulated_balances[addr] = 0
+                else:
+                    # Si validamos un solo bloque nuevo, usamos nuestra blockchain como base
+                    simulated_balances[addr] = self.get_chain_balance(addr)
             return simulated_balances[addr]
 
         # 1. Sumamos la recompensa de minado de la COINBASE al nodo minero
@@ -330,7 +335,7 @@ class Blockchain:
 
         for i in range(1, len(chain)):
             # Validamos cada bloque suministrando los balances arrastrados
-            if not self.validate_block(chain[i], chain[i - 1], external_balances=state_balances):
+            if not self.validate_block(chain[i], chain[i - 1], external_balances=state_balances, is_full_chain_validation=True):
                 return False
 
         return True
