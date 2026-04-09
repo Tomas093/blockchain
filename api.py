@@ -64,8 +64,6 @@ def new_transaction():
     return jsonify({"message": "Transaction added to pool", "transaction": tx.to_dict()}), 202
 @app.route("/mine", methods=["POST"])
 def mine():
-    if len(blockchain.pending_transactions) == 0:
-        return jsonify({"error": "No transactions to mine"}), 400
 
     block = blockchain.mine_block()
 
