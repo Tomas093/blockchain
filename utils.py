@@ -1,6 +1,5 @@
 import hashlib
-import json
-import time
+
 
 
 DIFFICULTY = 4  # number of leading zeros required in block hash
@@ -10,19 +9,21 @@ class TRANSACTION_TYPE:
     TRANSFER = "TRANSFER"
     COINBASE = "COINBASE"
 
+
 def calculate_hash(index: int, timestamp: int, transactions: list, previous_hash: str, nonce: int) -> str:
-    """SHA-256 hash of the block contents (everything except the hash itself)."""
-    block_string = json.dumps(
-        {
-            "index": index,
-            "timestamp": timestamp,
-            "transactions": [tx.to_dict() if hasattr(tx, "to_dict") else tx for tx in transactions],
-            "previousHash": previous_hash,
-            "nonce": nonce,
-        },
-        sort_keys=True,
-    )
-    return hashlib.sha256(block_string.encode()).hexdigest()
+
+    tx_ids = []
+    for tx in transactions:
+        if hasattr(tx, 'id'):
+            tx_ids.append(str(tx.id))
+        elif isinstance(tx, dict) and "id" in tx:
+            tx_ids.append(str(tx["id"]))
+
+    tx_ids_str = ",".join(tx_ids)
+
+    block_string = f"{index}|{timestamp}|{previous_hash}|{nonce}|{tx_ids_str}"
+
+    return hashlib.sha256(block_string.encode('utf-8')).hexdigest()
 
 
 def hash_valid(hash_value):

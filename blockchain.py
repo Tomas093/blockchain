@@ -24,7 +24,7 @@ class Blockchain:
         genesis = self._mine_raw_block(
             index=0,
             transactions=[],
-            previous_hash="0" * 64,
+            previous_hash="0",
             timestamp=0,
         )
         self.chain.append(genesis)
@@ -85,6 +85,25 @@ class Blockchain:
     def add_transaction(self, tx: Transaction):
         with self.lock:
             self.pending_transactions.append(tx)
+        # (No-op helpers here: validation helpers are defined as
+        # class-level static methods below.)
+
+    # -- Validation Helper ---------------------------------------------------------
+    @staticmethod
+    def _validate_ownership(tx) -> bool:
+        """Validate that: from == address(publicKey)"""
+        return validate_from_matches_public_key(tx.from_addr, tx.public_key)
+
+    @staticmethod
+    def _validate_signature(tx) -> bool:
+        """Verify the cryptographic signature with the canonical payload"""
+        payload = get_canonical_payload(
+            tx.from_addr,
+            tx.to_addr,
+            tx.amount,
+            tx.timestamp
+        )
+        return verify_signature(payload, tx.signature, tx.from_addr)
 
     # -- Balance calculation --
 
@@ -192,8 +211,10 @@ class Blockchain:
     def validate_block(block: Block, previous_block: Block):
         if block.index != previous_block.index + 1:
             return False
+
         if block.prev_hash != previous_block.hash:
             return False
+
         computed = calculate_hash(
             block.index,
             block.timestamp,
@@ -211,7 +232,6 @@ class Blockchain:
         if not hash_valid(block.hash):
             return False
 
-        # FIXED: Compare milliseconds against milliseconds (+ 60,000 ms)
         current_time_ms = int(time.time() * 1000)
         if block.timestamp > current_time_ms + 60000:
             return False
@@ -311,6 +331,8 @@ class Blockchain:
             if peer_url in self.peers:
                 continue
             self.peers.add(peer_url.rstrip("/"))
+
+
 
 
 # Global blockchain instance
