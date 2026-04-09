@@ -1,6 +1,5 @@
 import hashlib
-
-
+import socket
 
 DIFFICULTY = 4  # number of leading zeros required in block hash
 TRANSACTIONS_PER_BLOCK = 5
@@ -29,3 +28,15 @@ def calculate_hash(index: int, timestamp: int, transactions: list, previous_hash
 
 def hash_valid(hash_value):
     return hash_value.startswith("0" * DIFFICULTY)
+
+
+def get_my_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80)) # No hace conexión real
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
