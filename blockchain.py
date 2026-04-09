@@ -6,7 +6,7 @@ from typing import Any
 from crypto import get_canonical_payload, verify_signature, validate_from_matches_public_key
 
 from models import Block, Transaction
-from utils import calculate_hash, hash_valid, TRANSACTION_TYPE
+from utils import calculate_hash, hash_valid, TRANSACTION_TYPE, AUTO_MINE_THRESHOLD
 
 
 class Blockchain:
@@ -105,6 +105,17 @@ class Blockchain:
 
         return block
 
+    def _auto_mine_and_broadcast(self):
+        """Mina un bloque automáticamente y lo propaga a la red."""
+        with self.lock:
+            if len(self.pending_transactions) < AUTO_MINE_THRESHOLD:
+                return
+
+        block = self.mine_block()
+
+        if block:
+            self.broadcast_block(block)
+
     def add_transaction(self, tx: Transaction):
         """Adds a transaction to the mempool and broadcasts it if it is new."""
         tx_id = tx.id if hasattr(tx, "id") else tx.get("id")
@@ -121,8 +132,14 @@ class Blockchain:
             self.pending_transactions.append(tx)
             self.seen_transactions.add(tx_id)
 
+            pending_count = len(self.pending_transactions)
+
         # Broadcast asynchronously to avoid blocking the API thread
         threading.Thread(target=self.broadcast_transaction, args=(tx,), daemon=True).start()
+
+        if pending_count >= AUTO_MINE_THRESHOLD:
+            threading.Thread(target=self._auto_mine_and_broadcast, daemon=True).start()
+
         return True
 
     # -- Validation Helper ---------------------------------------------------------
@@ -145,19 +162,8 @@ class Blockchain:
     # -- Balance calculation --
 
     def get_balance(self, address: str) -> int:
-        """Calculate an account's balance by scanning the blockchain and the mempool."""
-        balance = 0
-
-        for block in self.chain:
-            for tx in block.transactions:
-                tx_from = tx.get("from") if isinstance(tx, dict) else tx.from_addr
-                tx_to = tx.get("to") if isinstance(tx, dict) else tx.to_addr
-                tx_amount = tx.get("amount") if isinstance(tx, dict) else tx.amount
-
-                if tx_to == address:
-                    balance += tx_amount
-                if tx_from == address:
-                    balance -= tx_amount
+        """Calcula el balance actual de una cuenta (Chain + Mempool)"""
+        balance = self.get_chain_balance(address)
 
         for tx in self.pending_transactions:
             tx_from = tx.get("from") if isinstance(tx, dict) else tx.from_addr
@@ -166,6 +172,21 @@ class Blockchain:
             if tx_from == address:
                 balance -= tx_amount
 
+        return balance
+
+    def get_chain_balance(self, address: str) -> int:
+        """Calcula el balance usando SOLO la blockchain (sin mempool)"""
+        balance = 0
+        for block in self.chain:
+            for tx in block.transactions:
+                tx_from = tx.get("from") if isinstance(tx, dict) else getattr(tx, "from_addr", None)
+                tx_to = tx.get("to") if isinstance(tx, dict) else getattr(tx, "to_addr", None)
+                tx_amount = tx.get("amount") if isinstance(tx, dict) else getattr(tx, "amount", 0)
+
+                if tx_to == address:
+                    balance += tx_amount
+                if tx_from == address:
+                    balance -= tx_amount
         return balance
 
     # -- Helper functions for transaction validation --
@@ -210,7 +231,7 @@ class Blockchain:
 
     # -- Block and chain validation ----------------------------------------
 
-    def validate_block(self, block: Block, previous_block: Block = None):
+    def validate_block(self, block: Block, previous_block: Block = None, external_balances: dict = None, is_full_chain_validation: bool = False):
         if block.index < 0: return False
         if block.timestamp <= 0: return False
         if block.transactions is None: return False
@@ -252,25 +273,54 @@ class Blockchain:
         coinbase_count = sum(1 for tx in block.transactions if get_tx_field(tx, 'type') == TRANSACTION_TYPE.COINBASE)
         if coinbase_count != 1: return False
 
+        # --- NUEVA SIMULACIÓN DE ESTADO Y VALIDACIÓN ESTRICTA ---
+        simulated_balances = external_balances.copy() if external_balances is not None else {}
+
+        def get_simulated_balance(addr):
+            if addr not in simulated_balances:
+                if is_full_chain_validation:
+                    # Si validamos una cadena entera desde 0, el balance base es 0
+                    simulated_balances[addr] = 0
+                else:
+                    # Si validamos un solo bloque nuevo, usamos nuestra blockchain como base
+                    simulated_balances[addr] = self.get_chain_balance(addr)
+            return simulated_balances[addr]
+
+        # 1. Sumamos la recompensa de minado de la COINBASE al nodo minero
+        miner_addr = get_tx_field(first_tx, 'to')
+        miner_amount = int(get_tx_field(first_tx, 'amount'))
+        simulated_balances[miner_addr] = get_simulated_balance(miner_addr) + miner_amount
+
+        # 2. Validamos el resto de las transacciones (TRANSFER)
         for tx in block.transactions[1:]:
             if get_tx_field(tx, 'type') != TRANSACTION_TYPE.TRANSFER: return False
 
             if isinstance(tx, dict):
                 tx_obj = Transaction(
-                    from_addr=tx.get("from"),
-                    to_addr=tx.get("to"),
-                    amount=tx.get("amount"),
-                    public_key=tx.get("publicKey"),
-                    signature=tx.get("signature"),
-                    tx_type=tx.get("type"),
-                    tx_id=tx.get("id"),
-                    timestamp=tx.get("timestamp")
+                    from_addr=tx.get("from"), to_addr=tx.get("to"), amount=tx.get("amount"),
+                    public_key=tx.get("publicKey"), signature=tx.get("signature"),
+                    tx_type=tx.get("type"), tx_id=tx.get("id"), timestamp=tx.get("timestamp")
                 )
             else:
                 tx_obj = tx
 
-            if not self.validate_transaction(tx_obj):
+            # Validación de propiedades intrínsecas
+            if not self._validate_basic_rules(tx_obj): return False
+            if not self._validate_ownership(tx_obj): return False
+            if not self._validate_signature(tx_obj): return False
+
+            # Chequeamos balance suficiente basándonos EXCLUSIVAMENTE en el estado acumulado
+            sender_balance = get_simulated_balance(tx_obj.from_addr)
+            if sender_balance < tx_obj.amount:
                 return False
+
+            # Actualizamos el estado para la siguiente transacción en el mismo bloque
+            simulated_balances[tx_obj.from_addr] -= tx_obj.amount
+            simulated_balances[tx_obj.to_addr] = get_simulated_balance(tx_obj.to_addr) + tx_obj.amount
+
+        # Guardar estado por si estamos validando múltiples bloques (validate_chain)
+        if external_balances is not None:
+            external_balances.update(simulated_balances)
 
         return True
 
@@ -278,12 +328,16 @@ class Blockchain:
         if not chain:
             return False
 
-        if not Blockchain.validate_block(chain[0], None):
+        if not self.validate_block(chain[0], None):
             return False
 
+        state_balances = {}
+
         for i in range(1, len(chain)):
-            if not Blockchain.validate_block(chain[i], chain[i - 1]):
+            # Validamos cada bloque suministrando los balances arrastrados
+            if not self.validate_block(chain[i], chain[i - 1], external_balances=state_balances, is_full_chain_validation=True):
                 return False
+
         return True
 
     def add_block(self, block: Any):
