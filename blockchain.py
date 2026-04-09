@@ -24,7 +24,7 @@ class Blockchain:
         genesis = self._mine_raw_block(
             index=0,
             transactions=[],
-            previous_hash="0" * 64,
+            previous_hash="0",
             timestamp=0,
         )
         self.chain.append(genesis)
